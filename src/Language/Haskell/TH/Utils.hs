@@ -177,17 +177,17 @@ pprintQ q = runQ q >>= putStrLn.pprint
 {-|
 > runQ [| (1+1) * 5|] >>= pp -- or use
 > printiQ  [| (1+1) * 5|]
-InfixE (Just InfixE (Just LitE (IntegerL 1))
-                    (VarE (Name (OccName "+")
-                                (NameG' VarName
-                                        (PkgName "base")
-                                        (ModName "GHC.Num"))))
-                    (Just LitE (IntegerL 1)))
-       (VarE (Name (OccName "*")
-                   (NameG' VarName
-                           (PkgName "base")
-                           (ModName "GHC.Num"))))
-       (Just LitE (IntegerL 5))
+> InfixE (Just InfixE (Just LitE (IntegerL 1))
+>                   (VarE (Name (OccName "+")
+>                                (NameG' VarName
+>                                        (PkgName "base")
+>                                        (ModName "GHC.Num"))))
+>                    (Just LitE (IntegerL 1)))
+>       (VarE (Name (OccName "*")
+>                   (NameG' VarName
+>                           (PkgName "base")
+>                           (ModName "GHC.Num"))))
+>       (Just LitE (IntegerL 5))
 -}
 printiQ :: Out a => Q a -> IO ()
 printiQ q = runQ q >>= pp
