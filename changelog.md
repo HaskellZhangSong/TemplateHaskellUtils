@@ -1,0 +1,1 @@
+@applyKinds@ is renamed to @applyKind@

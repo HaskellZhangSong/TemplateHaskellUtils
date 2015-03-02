@@ -14,19 +14,17 @@
 -----------------------------------------------------------------------------
 
 module Language.Haskell.TH.Utils(
-       appExp, appExp',
-       appConT, appConT',
-       curryType, curryType',
+       rename, rename', rename'', nameToExp, 
+       appExp, appExp', unappExp, unappExp',
+       appConT, appConT', unappConT, unappConT',
+       curryType, curryType', uncurryType, uncurryType',
        genBT, genBT',
        genPE, genPE',
-       appKinds,
-       curryKind,
-       getTypeNames,
-       getTVBName ,
+       appKind, unappKind,
+       curryKind, uncurryKind,
+       getTypeNames, getTVBName ,
        getCompositeType,getConName,
-       seqTup2, seqTup3,seqTup4, 
-       rename, rename', rename'',
-       nameToExp, 
+       seqTup2, seqTup3,seqTup4, unsequence,
        printQ, pprintQ, printiQ, printi,
        -- | exported GenericPretty package
        module Text.PrettyPrint.GenericPretty
@@ -36,13 +34,16 @@ where
 import Language.Haskell.TH
 import Language.Haskell.TH.Lib hiding (Role)
 import Data.List (foldl1,foldr1)
+import Debug.Trace
 import Control.Monad
 import Language.Haskell.TH.Syntax
 import Text.PrettyPrint.GenericPretty
 import GHC.Generics hiding (Fixity)
 import GHC.Word
 import GHC.Types
+import Data.List
 
+import System.IO.Unsafe
 -- sorry for the following messy, I will write a library to generate empty instances automatically
 instance Out Name
 instance Out Type
@@ -87,7 +88,7 @@ instance Out OccName
 instance Out AnnTarget
 instance Out Word8
 
--- sorry for the messy, I will also write a library to do this automatically
+-- sorry for the messy, I will also write a TH library to do this automatically
 deriving instance Generic FixityDirection
 deriving instance Generic Inline
 deriving instance Generic RuleBndr
@@ -146,7 +147,8 @@ instance Generic Word8 where
   from x = M1 (M1 (M1 (K1 x)))
   to (M1 (M1 (M1 (K1 x)))) = x
 
--- This is bacause GHC 7.8 does not support unboxed value to be made into Generic
+-- This is bacause GHC 7.8 does not support unlifted value to be made into Generic
+-- I am trying to do it with Template Haskell
 instance Generic NameFlavour where
   type Rep NameFlavour = (Rep NameFlavour')
   from (NameS) = from NameS'
@@ -179,7 +181,7 @@ pprintQ q = runQ q >>= putStrLn.pprint
 > printiQ  [| (1+1) * 5|]
 > InfixE (Just InfixE (Just LitE (IntegerL 1))
 >                   (VarE (Name (OccName "+")
->                                (NameG' VarName
+>                               (NameG' VarName
 >                                        (PkgName "base")
 >                                        (ModName "GHC.Num"))))
 >                    (Just LitE (IntegerL 1)))
@@ -189,6 +191,7 @@ pprintQ q = runQ q >>= putStrLn.pprint
 >                           (ModName "GHC.Num"))))
 >       (Just LitE (IntegerL 5))
 -}
+
 printiQ :: Out a => Q a -> IO ()
 printiQ q = runQ q >>= pp
 
@@ -200,6 +203,13 @@ printi a = pp a
 printQ :: Show a => Q a -> IO ()
 printQ q = runQ q >>= putStrLn.show
 
+-- | Debug print
+dprint :: Show a => String -> Q a -> Q a
+dprint str q = do
+           a <- q
+           trace (str ++ ": " ++ show a) q
+
+
 -- | sequence-like functons on tuples
 seqTup2 :: (Q a, Q b) -> Q (a, b) 
 seqTup2 (a,b) = liftM2 (,) a b
@@ -209,6 +219,12 @@ seqTup3 (a,b,c) = liftM3 (,,) a b c
 
 seqTup4 :: (Q a, Q b, Q c, Q d) -> Q (a, b, c, d)
 seqTup4 (a,b,c,d) = liftM4 (,,,) a b c d
+
+-- | Unsequence @Q [a]@ to [Q a], but you never get rid of the outer 'Q'
+unsequence :: Q [a] -> Q [Q a]
+unsequence qs = do
+           s <- qs
+           return $ map return s
 
 -- | Rename a 'Name'
 rename :: Q Name -> (String -> String) -> Q Name
@@ -252,6 +268,31 @@ appExp = appsE
 appExp' :: [Exp] -> Exp
 appExp' = foldl1 AppE
 
+unappExp :: ExpQ -> Q [Exp]
+unappExp = fmap unappExp'
+
+unappExp' :: Exp -> [Exp]
+unappExp' a@(AppE e1 e2) = reverse $ unfold (not.isAppE)  unappE restUnappE a
+unappExp' e = [e]
+
+foo = (AppE (AppE (VarE 'const) (LitE (IntegerL 3))) (ConE (mkName "True")))
+
+isAppE :: Exp -> Bool
+isAppE (AppE _ _) = True
+isAppE _ = False
+
+unappE :: Exp -> Exp
+unappE (AppE e1 e2) = e2
+unappE x = x
+
+restUnappE :: Exp -> Exp
+restUnappE (AppE e1 e2) = e1
+restunappE x = x
+
+unfold :: (t1 -> Bool) -> (t1 -> t1) -> (t1 -> t1) -> t1 -> [t1]
+unfold p h t x | p x = [x]
+               | otherwise =  h x : unfold p h t (t x)
+
 -- | Apply a type constructor like 'appExp'
 
 {-|
@@ -262,10 +303,35 @@ appExp' = foldl1 AppE
 appConT :: [TypeQ] -> TypeQ
 appConT = foldl1 appT
 
+-- | Unapply a constructor application to a list of types
+unappConT' :: Type -> [Type]
+unappConT' a@(AppT t1 t2) = reverse $ unfold (not.isAppT) unappT restUnappT a
+unappConT' a@(ForallT tvbs cxt t) = reverse $ unfold (not.isAppT) unappT restUnappT t
+unappConT' x = [x]
+
+-- | Unapply a constructor application to a list of types
+unappConT :: TypeQ -> Q [Type]
+unappConT = fmap unappConT'
+
+--fooT = AppT (AppT (ConT ''Either) (ConT ''Int)) (ConT ''Bool)
+
+isAppT :: Type -> Bool
+isAppT (AppT _ _ ) = True
+isAppT _ = False
+
+unappT :: Type -> Type
+unappT (AppT t1 t2) = t2
+unappT x = x
+
+restUnappT :: Type -> Type
+restUnappT (AppT t1 t2) = t1
+restUnappT x = x
+
 appConT' :: [Type] -> Type
 appConT' = foldl1 AppT
 
--- | > convert [a, b, c] to a -> b -> c
+
+-- | convert @[a, b, c]@ to @a -> b -> c@
 {-|
 > > pprint $ curryType' (map ConT [''Int , ''Int , ''Bool])
 > "GHC.Types.Int -> GHC.Types.Int -> GHC.Types.Bool"
@@ -275,6 +341,23 @@ curryType  = foldr1 (\t1 -> appT (appT arrowT t1))
 
 curryType' :: [Type] -> Type
 curryType' = foldr1 (\t1 -> AppT (AppT ArrowT t1))
+
+-- | > convert @a -> b -> c@ to @[a,b,c]
+{-|
+> > uncurryType' (ForallT [PlainTV (mkName "a")] [] (AppT (AppT ArrowT (VarT (mkName "a"))) (ConT ''Int)))
+> > [VarT a,ConT GHC.Types.Int]
+-}
+uncurryType :: TypeQ -> Q [Type]
+uncurryType = fmap uncurryType'
+
+uncurryType' :: Type -> [Type]
+uncurryType' t@(AppT (AppT ArrowT t1) t2) = t1 : helper t2
+uncurryType' t@(ForallT tyvs cxt ty) = helper ty
+uncurryType' x = [x]
+
+helper :: Type -> [Type]
+helper t@(AppT (AppT ArrowT t1) t2) = t1 : helper t2
+helper t = [t]
 
 {-|
 > > genBT' "a" 3
@@ -294,11 +377,11 @@ genBT' :: String -> Int -> ([TyVarBndr], [Type])
 genBT' name n = let ns = [name++ (show i) | i <- [1..n]] 
                     in (map (plainTV.mkName) ns, map (VarT . mkName) ns)
 
+
 {-|
 > > genPE' "a" 3
 > ([VarP a1,VarP a2,VarP a3],[VarE a1,VarE a2,VarE a3])
 -}
-
 -- | Generate related patterns and expressions
 genPE :: String -> Int -> Q ([PatQ],[ExpQ])
 genPE name n = do 
@@ -313,12 +396,20 @@ genPE' name n = let ns = [name++ (show i) | i <- [1..n]]
                  in (map (VarP . mkName) ns,map (VarE . mkName) ns)
 
 -- | Apply a list of kinds, like 'appConT'
-appKinds :: [Kind] -> Kind
-appKinds = foldr1 AppT
+appKind :: [Kind] -> Kind
+appKind = foldr1 AppT
+
+-- | Like 'unappConT' 
+unappKind :: Kind -> [Kind]
+unappKind  = unappConT'
 
 -- | Like 'curryType' but on kind level
 curryKind :: [Kind] -> Kind
 curryKind =  curryType'
+
+-- | Like 'uncurryType'
+uncurryKind :: Kind -> [Kind]
+uncurryKind = uncurryType'
 
 -- | Get name from constructors
 getConName :: Con -> Name 
@@ -348,4 +439,3 @@ getCompositeType (RecC    n vars)       = concatMap getTypeNames (map third vars
 getCompositeType (InfixC st1 n st2)     = concatMap getTypeNames [snd st1 , snd st2]
 -- This could be a problem since it will lose info for context and type variables 
 getCompositeType (ForallC tvbs cxt con) = getCompositeType con
-
